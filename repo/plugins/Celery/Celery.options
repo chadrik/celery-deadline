@@ -1,0 +1,63 @@
+[Executable]
+Type=string
+Label=Executable
+Category=Command Line Options
+CategoryOrder=0
+Index=0
+Description=The command executable to run
+Required=false
+DisableIfBlank=true
+
+[Arguments]
+Type=string
+Label=Arguments
+Category=Command Line Options
+CategoryOrder=0
+Index=1
+Description=The command arguments to use
+Required=false
+DisableIfBlank=true
+
+[StartupDirectory]
+Type=string
+Label=Startup Directory
+Category=Command Line Options
+CategoryOrder=0
+Index=2
+Description=The directory to start the command line in (leave blank to use default)
+Required=false
+DisableIfBlank=true
+
+[ShellExecute]
+Type=boolean
+Label=Execute In Shell
+Category=Command Line Options
+CategoryOrder=0
+Index=3
+Description=If enabled, the specified argument(s) will be executed through the current shell.
+Required=true
+DisableIfBlank=false
+Default=false
+
+[Shell]
+Type=enum
+Values=default;bash;csh;ksh;sh;tcsh;zsh
+Label=Shell To Use
+CategoryOrder=0
+Index=4
+Category=Command Line Options
+Description=Specify the SHELL to use or use the 'default' shell for the platform.
+Required=true
+DisableIfBlank=false
+Default=default
+
+[SingleFramesOnly]
+Type=boolean
+Label=Single Frames Only
+Category=Command Line Options
+CategoryOrder=0
+Index=5
+Description=Gets or sets if the plugin can only render one frame at a time.
+Required=true
+DisableIfBlank=false
+Default=false

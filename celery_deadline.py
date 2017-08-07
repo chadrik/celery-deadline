@@ -2,108 +2,168 @@ import sys
 import os
 import os.path
 import json
+import tempfile
+import getpass
 
-from celery import Celery
 from celery.app.amqp import AMQP
 from celery import bootsteps
 import kombu
 import kombu.pools
+import requests
+
+TASK_FILE = 'celery-task.json'
+
+# deadline organizational strategies:
+# BatchName  Job Name
+# {group}    {task}-{id}   batch name by group id if present, then one task per job
+# {group}    {task}        batch name by group id if present, then tasks of same type in one job
+# custom     {task}        custom batch name
+# {app}      {task}        
+#            {group}       tasks in the same group in one job
+
+# better names: group_id, task_id, task_name, task_args, task_kwargs, app_name
+
+# ExtraInfoKeyValue0=TestID=344
+
+task_exchange = kombu.Exchange('tasks', type='topic')
+
+def enable_deadline_support(app, mongodb):
+    app.amqp_cls = __name__ + ':DeadlineAMQP'
+
+
+def get_queue(job_id):
+    return kombu.Queue('deadline-%s' % job_id, exchange=task_exchange,
+                       routing_key='deadline.%s.*' % job_id)
+
+def submit_job(pulse_url, job_info, plugin_info, aux_files=None, auth=None):
+    import requests
+    import urllib
+
+    print pulse_url
+    url = pulse_url + '/api/jobs'
+
+    if auth is None:
+        auth = (getpass.getuser(), '')
+    elif isinstance(auth, basestring):
+        auth = (auth, '')
+
+    data = {
+        'JobInfo': job_info,
+        'PluginInfo': plugin_info,
+        'AuxFiles': aux_files or [],
+        'IdOnly': True
+    }
+    import pprint
+    pprint.pprint(data)
+    resp = requests.post(url, auth=auth, data=json.dumps(data))
+
+    if not resp.ok:
+        print ('Request failed with status {0:d}: '
+               '{1} {2}').format(resp.status_code, resp.reason, resp.text)
+        raise PulseRequestError(resp.status_code, resp.text)
+
+    return resp.json()['_id']
 
 
 class DeadlineProducer(kombu.Producer):
-    def __init__(self, *args, **kwargs):
-        print "DeadlineProducer instatiated"
-        super(DeadlineProducer, self).__init__(*args, **kwargs)
+    # FIXME: this should be configurable at the app level, and/or via apply_async
+    pulse_url = 'http://MacBook-Pro-4.local:8082'
 
-    def publish(self, *args, **kwargs):
-        # probably not compatible with deadline?
-        kwargs['retry'] = False
-        super(DeadlineProducer, self).publish(*args, **kwargs)
+    def __init__(self, channel, *args, **kwargs):
+        super(DeadlineProducer, self).__init__(channel, *args, **kwargs)
+        self.topic_exchange = None
 
-    def _publish(self, body, priority, content_type, content_encoding,
-                 headers, properties, routing_key, mandatory,
-                 immediate, exchange, declare):
-        message = self.channel.prepare_message(
-            body, priority, content_type,
-            content_encoding, headers, properties,
-        )
-        import pprint
-        filepath = headers['id'] + '.json'
-        print "sending to deadline", filepath
-        print message
-        with open(filepath, 'w') as f:
-            f.write(json.dumps(message))
+    def publish(self, body, routing_key=None, delivery_mode=None,
+                mandatory=False, immediate=False, priority=0,
+                content_type=None, content_encoding=None, serializer=None,
+                headers=None, compression=None, exchange=None, retry=False,
+                retry_policy=None, declare=[], **properties):
+        # FIXME:
+        # detect if deadline was requested based on properties. 
+        # maybe this doubles as way of passing pulse URL?
+        deadline_requested = True
+        if deadline_requested:
+            # probably not compatible with deadline?
+            retry = False
+            # if self.topic_exchange is None:
+            #     self.topic_exchange = task_exchange(self.channel)
+            #     self.topic_exchange.declare()
+            self.maybe_declare(task_exchange)
+            job_info = properties.pop('job_info', {}).copy()
+            job_id = self._submit_deadline_job(job_info, headers)
+            print "JOBID", job_id, body
+            routing_key = 'deadline.%s.0' % job_id
+            self.maybe_declare(get_queue(job_id))
+            exchange = task_exchange
+        return super(DeadlineProducer, self).publish(
+            body, routing_key, delivery_mode, mandatory, immediate, priority, 
+            content_type, content_encoding, serializer, headers, compression,
+            exchange, retry, retry_policy, declare, **properties)
+
+    def _submit_deadline_job(self, job_info, headers):
+        group_id = headers['group']
+
+        # setup JobInfo
+        job_info['Plugin'] = 'Celery'
+        job_info['Frames'] = '1'
+        if group_id:
+            job_info.setdefault('BatchName', 'celery-{}'.format(group_id))
+        job_info.setdefault('Name', '{task}-{id}'.format(**headers))
+        return submit_job(self.pulse_url, job_info, {})
 
 
 class DeadlineConsumer(kombu.Consumer):
     """
     Consumer that reads a single task then shuts down the worker
     """
-    def __init__(self, *args, **kwargs):
-        print "DeadlineConsumer instatiated"
-        super(DeadlineConsumer, self).__init__(*args, **kwargs)
+
+    # def consume(self, no_ack=None):
+    #     import kombu.utils
+    #     from kombu.message import Message
+
+    #     filepath = os.path.join('.', TASK_FILE)
+    #     print "consuming message", filepath
+    #     print os.getcwd()
+    #     with open(filepath, 'r') as f:
+    #         raw_message = json.loads(f.read())
+
+    #     raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
+    #     # run the task:
+    #     self._receive_callback(raw_message)
+    #     print "done receive"
+    #     sys.exit(0)
+
+    def _receive_callback(self, message):
+        print "MESSAGE", message
+        super(DeadlineConsumer, self)._receive_callback(message)
+        print "done receive"
+        sys.exit(0)
 
     def consume(self, no_ack=None):
         import kombu.utils
         from kombu.message import Message
 
-        task_id = os.environ['TASK_ID']
-
-        filepath = task_id + '.json'
-        print "consuming message", filepath
-        with open(filepath, 'r') as f:
-            raw_message = json.loads(f.read())
-
-        raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
-        self._receive_callback(raw_message)
-        print "done receive"
-        sys.exit(0)
-
-
-# FIXME: ideally celery would automatically take my Producer class into account with pools:
-class Producers(kombu.pools.PoolGroup):
-
-    def create(self, connection, limit):
-        pool = kombu.pools.ProducerPool(kombu.pools.connections[connection], limit=limit)
-        pool.Producer = DeadlineProducer
-        return pool
-
-producers = kombu.pools.register_group(Producers(limit=kombu.pools.use_global_limit))
+        job_id = os.environ['DEADLINE_JOB_ID']
+        print "JOBID", job_id
+        queue = get_queue(job_id)
+        self._basic_consume(queue.bind(self.channel), no_ack=no_ack, nowait=True)
 
 
 class DeadlineAMQP(AMQP):
-    Consumer = DeadlineConsumer
+    def Consumer(self, *args, **kwargs):
+        # FIXME: check for deadline env var
+        return DeadlineConsumer(*args, **kwargs)
+
     Producer = DeadlineProducer
 
-    # FIXME: ideally celery would automatically take my Producer class into account with pools:
     @property
     def producer_pool(self):
         if self._producer_pool is None:
-            self._producer_pool = producers[
+            self._producer_pool = kombu.pools.producers[
                 self.app.connection_for_write()]
             self._producer_pool.limit = self.app.pool.limit
+            # TODO: submit this patch to celery:
+            self._producer_pool.Producer = self.Producer
         return self._producer_pool
 
-
-app = Celery('tasks', amqp='celery_deadline:DeadlineAMQP')
-app.conf.broker_url = 'redis://localhost:6379/0'
-app.conf.result_backend = 'redis://localhost:6379/0'
-
-@app.task
-def add(x, y):
-    print "ADDDING!!!!"
-    return x + y
-
-# run with
-# celery -A celery_deadline worker -l debug -P solo --without-gossip --without-mingle --without-heartbeat
-
-def test():
-    # print add.delay(2, 2)
-
-    from celery import group
-    job = group([add.s(2, 2), add.s(4, 4) ])
-
-    result = job.apply_async()
-    for x in result.iterate():
-        print "result is:", x
 

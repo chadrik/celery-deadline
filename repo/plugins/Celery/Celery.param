@@ -1,0 +1,71 @@
+[About]
+Type=label
+Label=About
+Category=About Plugin
+CategoryOrder=-1
+Index=0
+Default=Celery Plugin for Deadline
+Description=Not configurable
+
+[ConcurrentTasks]
+Type=label
+Label=ConcurrentTasks
+Category=About Plugin
+CategoryOrder=-1
+Index=0
+Default=True
+Description=Not configurable
+
+[ShellExecutable_bash]
+Type=multilinemultifilename
+Label=Bash Executable
+Category=Shell Executables
+CategoryOrder=0
+CategoryIndex=0
+Default=/bin/bash;C:\cygwin\bin\bash.exe
+Description=The path to the Bash executable. Enter alternative paths on separate lines.
+
+[ShellExecutable_csh]
+Type=multilinemultifilename
+Label=Csh Executable
+Category=Shell Executables
+CategoryOrder=0
+CategoryIndex=1
+Default=/bin/csh;C:\cygwin\bin\csh.exe
+Description=The path to the Csh executable. Enter alternative paths on separate lines.
+
+[ShellExecutable_ksh]
+Type=multilinemultifilename
+Label=Ksh Executable
+Category=Shell Executables
+CategoryOrder=0
+CategoryIndex=2
+Default=/bin/ksh;C:\cygwin\bin\ksh.exe
+Description=The path to the Ksh executable. Enter alternative paths on separate lines.
+
+[ShellExecutable_sh]
+Type=multilinemultifilename
+Label=Sh Executable
+Category=Shell Executables
+CategoryOrder=0
+CategoryIndex=3
+Default=/bin/sh;C:\cygwin\bin\sh.exe
+Description=The path to the Sh executable. Enter alternative paths on separate lines.
+
+[ShellExecutable_tcsh]
+Type=multilinemultifilename
+Label=Tcsh Executable
+Category=Shell Executables
+CategoryOrder=0
+CategoryIndex=4
+Default=/bin/tcsh;C:\cygwin\bin\tcsh.exe
+Description=The path to the Tcsh executable. Enter alternative paths on separate lines.
+
+[ShellExecutable_zsh]
+Type=multilinemultifilename
+Label=Zsh Executable
+Category=Shell Executables
+CategoryOrder=0
+CategoryIndex=5
+Default=/bin/zsh;C:\cygwin\bin\zsh.exe
+Description=The path to the Zsh executable. Enter alternative paths on separate lines.
