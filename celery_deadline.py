@@ -1,7 +1,6 @@
 import sys
 import os
 import os.path
-import tempfile
 import getpass
 import json
 
@@ -43,10 +42,6 @@ class DummyChannel(base.Channel):
 
 
 def submit_job(pulse_url, job_info, plugin_info, aux_files=None, auth=None):
-    import requests
-    import urllib
-
-    print pulse_url
     url = pulse_url + '/api/jobs'
 
     if auth is None:
@@ -139,8 +134,9 @@ class DeadlineConsumer(kombu.Consumer):
     """
     Consumer that reads a single task then shuts down the worker
     """
-    def __init__(self, channel, *args, **kwargs):
-        self.deadline_mongo_url = kwargs.pop('deadline_mongo_url', None)
+    def __init__(self, job_id, channel, *args, **kwargs):
+        self.job_id = job_id
+        self.deadline_mongo_url = kwargs.pop('deadline_mongo_url')
         super(DeadlineConsumer, self).__init__(channel, *args, **kwargs)
 
     @cached_property
@@ -152,9 +148,8 @@ class DeadlineConsumer(kombu.Consumer):
         tasks_col = get_collection(self.mongo_client)
         # FIXME: get this elsewhere
         curr_task_num = 0
-        job_id = os.environ['DEADLINE_JOB_ID']
         # note: $slice is [skip, limit/count]
-        doc = tasks_col.find_one({'_id': ObjectId(job_id)},
+        doc = tasks_col.find_one({'_id': ObjectId(self.job_id)},
                                  {'tasks': {'$slice': [curr_task_num, 1]}})
         raw_message = json.loads(doc['tasks'][0])
         print "raw_message", raw_message
@@ -173,16 +168,16 @@ class DeadlineConsumer(kombu.Consumer):
         print "done receive"
         sys.exit(0)
 
-    def _receive_callback(self, message):
-        print "MESSAGE", message
-        super(DeadlineConsumer, self)._receive_callback(message)
-        print "done receive"
-        sys.exit(0)
+    # def _receive_callback(self, message):
+    #     print "MESSAGE", message
+    #     super(DeadlineConsumer, self)._receive_callback(message)
+    #     print "done receive"
+    #     sys.exit(0)
 
     # def consume(self, no_ack=None):
     #     import kombu.utils
     #     from kombu.message import Message
-
+    #
     #     job_id = os.environ['DEADLINE_JOB_ID']
     #     print "JOBID", job_id
     #     queue = get_queue(job_id)
@@ -191,10 +186,9 @@ class DeadlineConsumer(kombu.Consumer):
 
 class DeadlineAMQP(AMQP):
     @cached_property
-    def _mongo_url(self):
+    def mongo_url(self):
         conf = self.app.conf
         mongo_url = conf.get('deadline_mongo_url')
-        print "mongo", mongo_url
         if mongo_url:
             return mongo_url
         if conf.result_backend and conf.result_backend.startswith('mongodb://'):
@@ -202,13 +196,16 @@ class DeadlineAMQP(AMQP):
         return
 
     def Consumer(self, *args, **kwargs):
-        # FIXME: check for deadline env var
-        kwargs['deadline_mongo_url'] = self._mongo_url
-        return DeadlineConsumer(*args, **kwargs)
+        job_id = os.environ.get('DEADLINE_JOB_ID')
+        if job_id:
+            kwargs['deadline_mongo_url'] = self.mongo_url
+            return DeadlineConsumer(job_id, *args, **kwargs)
+        else:
+            return kombu.Consumer(*args, **kwargs)
 
     def Producer(self, *args, **kwargs):
         kwargs['deadline_pulse_url'] = self.app.conf.get('deadline_pulse_url')
-        kwargs['deadline_mongo_url'] = self._mongo_url
+        kwargs['deadline_mongo_url'] = self.mongo_url
         return DeadlineProducer(*args, **kwargs)
 
     @property
