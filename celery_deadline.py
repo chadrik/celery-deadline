@@ -11,8 +11,6 @@ import kombu
 import kombu.pools
 import requests
 
-TASK_FILE = 'celery-task.json'
-
 # deadline organizational strategies:
 # BatchName  Job Name
 # {group}    {task}-{id}   batch name by group id if present, then one task per job
@@ -27,6 +25,7 @@ TASK_FILE = 'celery-task.json'
 
 task_exchange = kombu.Exchange('tasks', type='topic')
 
+
 def enable_deadline_support(app, mongodb):
     app.amqp_cls = __name__ + ':DeadlineAMQP'
 
@@ -34,6 +33,7 @@ def enable_deadline_support(app, mongodb):
 def get_queue(job_id):
     return kombu.Queue('deadline-%s' % job_id, exchange=task_exchange,
                        routing_key='deadline.%s.*' % job_id)
+
 
 def submit_job(pulse_url, job_info, plugin_info, aux_files=None, auth=None):
     import requests
@@ -66,12 +66,10 @@ def submit_job(pulse_url, job_info, plugin_info, aux_files=None, auth=None):
 
 
 class DeadlineProducer(kombu.Producer):
-    # FIXME: this should be configurable at the app level, and/or via apply_async
-    pulse_url = 'http://MacBook-Pro-4.local:8082'
 
     def __init__(self, channel, *args, **kwargs):
+        self.deadline_pulse_url = kwargs.pop('deadline_pulse_url', None)
         super(DeadlineProducer, self).__init__(channel, *args, **kwargs)
-        self.topic_exchange = None
 
     def publish(self, body, routing_key=None, delivery_mode=None,
                 mandatory=False, immediate=False, priority=0,
@@ -82,12 +80,13 @@ class DeadlineProducer(kombu.Producer):
         # detect if deadline was requested based on properties. 
         # maybe this doubles as way of passing pulse URL?
         deadline_requested = True
-        if deadline_requested:
-            # probably not compatible with deadline?
+        if deadline_requested and self.deadline_pulse_url:
+            # retry is probably not compatible with deadline?
             retry = False
             # if self.topic_exchange is None:
             #     self.topic_exchange = task_exchange(self.channel)
             #     self.topic_exchange.declare()
+            # FIXME: only call this once?
             self.maybe_declare(task_exchange)
             job_info = properties.pop('job_info', {}).copy()
             job_id = self._submit_deadline_job(job_info, headers)
@@ -109,7 +108,7 @@ class DeadlineProducer(kombu.Producer):
         if group_id:
             job_info.setdefault('BatchName', 'celery-{}'.format(group_id))
         job_info.setdefault('Name', '{task}-{id}'.format(**headers))
-        return submit_job(self.pulse_url, job_info, {})
+        return submit_job(self.deadline_pulse_url, job_info, {})
 
 
 class DeadlineConsumer(kombu.Consumer):
@@ -154,7 +153,9 @@ class DeadlineAMQP(AMQP):
         # FIXME: check for deadline env var
         return DeadlineConsumer(*args, **kwargs)
 
-    Producer = DeadlineProducer
+    def Producer(self, *args, **kwargs):
+        kwargs['deadline_pulse_url'] = self.app.conf.get('deadline_pulse_url')
+        return DeadlineProducer(*args, **kwargs)
 
     @property
     def producer_pool(self):

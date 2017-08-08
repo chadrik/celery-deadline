@@ -5,7 +5,7 @@ app = Celery('testapp')
 app.conf.broker_url = "amqp://guest:guest@localhost:5672//"
 app.conf.result_backend = 'redis://localhost:6379/0'
 app.amqp_cls = 'celery_deadline:DeadlineAMQP'
-
+app.conf.deadline_pulse_url = 'http://MacBook-Pro-4.local:8082'
 # from celery_deadline import enable_deadline_support
 # enable_deadline_support(app, 'mongodb://')
 
