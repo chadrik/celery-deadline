@@ -1,0 +1,6 @@
+# This control is required by Deadline
+[State]
+Type=Enum
+Items=Global Enabled;Opt-In;Disabled
+Label=State
+Default=Opt-In

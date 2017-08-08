@@ -25,17 +25,17 @@ from bson.objectid import ObjectId
 
 # better names: group_id, task_id, task_name, task_args, task_kwargs, app_name
 
-# ExtraInfoKeyValue0=TestID=344
-
 
 def enable_deadline_support(app, mongodb):
     app.amqp_cls = __name__ + ':DeadlineAMQP'
 
 
 def get_collection(client):
-    return client.celery_deadline.job_tasks
+    return client['celery_deadline']['job_tasks']
 
 
+# override the base virtual channel so that it doesn't use the connection object.  we use this
+# for converting to and from Message objects.
 class DummyChannel(base.Channel):
     def __init__(self, *args, **kwargs):
         pass
@@ -124,6 +124,7 @@ class DeadlineProducer(kombu.Producer):
         # setup JobInfo
         job_info['Plugin'] = 'Celery'
         job_info['Frames'] = '1'
+        job_info['EventOptIns'] = 'CeleryJobPurgedEvent'
         if group_id:
             job_info.setdefault('BatchName', 'celery-{}'.format(group_id))
         job_info.setdefault('Name', '{task}-{id}'.format(**headers))
@@ -148,24 +149,20 @@ class DeadlineConsumer(kombu.Consumer):
         tasks_col = get_collection(self.mongo_client)
         # FIXME: get this elsewhere
         curr_task_num = 0
+        packet_size = 1
         # note: $slice is [skip, limit/count]
         doc = tasks_col.find_one({'_id': ObjectId(self.job_id)},
-                                 {'tasks': {'$slice': [curr_task_num, 1]}})
-        raw_message = json.loads(doc['tasks'][0])
-        print "raw_message", raw_message
-        raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
+                                 {'tasks': {'$slice': [curr_task_num, packet_size]}})
         # override the channel so that we get a simple, consistent decoding scheme. otherwise,
         # the behavior is dependent on the channel type
         self.channel = DummyChannel()
-        # message = Message(payload=raw_message, channel=channel)
-        # print message.decode()
-        # print message.headers
-        # print self.on_message
-        # print getattr(self.channel, 'message_to_python', None)
-        # run the task:
-        print "running"
-        self._receive_callback(raw_message)
-        print "done receive"
+        for raw_str in doc['tasks']:
+            raw_message = json.loads(raw_str)
+            print "raw_message", raw_message
+            raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
+            print "running"
+            self._receive_callback(raw_message)
+            print "done receive"
         sys.exit(0)
 
     # def _receive_callback(self, message):
