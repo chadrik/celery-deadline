@@ -22,15 +22,19 @@ def add(x, y):
 def test():
     # print add.delay(2, 2)
 
-    from celery import group
-    job = group([add.s(2, 2), add.s(4, 4)])
+    from celery import group, chain
 
-    result = job.apply_async(job_info={})
-    print "waiting for results:"
-    for x in result.iterate():
-        print "result is:", x
+    job_info = {'Name': '{task_name}{task_args}', 'BatchName': 'celery-{root_id}'}
+    result = chain(add.s(1, 1),
+                   add.signature((4,), job_info=job_info)).apply_async(job_info=job_info)
+    print result.get()
+
+    # job = group([add.s(2, 2), add.s(4, 4)])
+    # result = job.apply_async(job_info=job_info)
+    # print "waiting for results:"
+    # for x in result.iterate():
+    #     print "result is:", x
 
 
 if __name__ == '__main__':
     test()
-

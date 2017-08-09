@@ -3,6 +3,7 @@ import os
 import os.path
 import getpass
 import json
+import base64
 
 from celery.app.amqp import AMQP
 import kombu
@@ -17,13 +18,11 @@ from bson.objectid import ObjectId
 
 # deadline organizational strategies:
 # BatchName  Job Name
-# {group}    {task}-{id}   batch name by group id if present, then one task per job
-# {group}    {task}        batch name by group id if present, then tasks of same type in one job
-# custom     {task}        custom batch name
-# {app}      {task}        
-#            {group}       tasks in the same group in one job
-
-# better names: group_id, task_id, task_name, task_args, task_kwargs, app_name
+# {group_id}    {task_name}-{task_id}   batch name by group id if present, then one task per job
+# {group_id}    {task_name}             batch name by group id if present, then tasks of same type in one job
+# custom        {task_name}             custom batch name
+# {app_name}    {task_name}
+#               {group}                 tasks in the same group in one job
 
 
 def enable_deadline_support(app, mongodb):
@@ -55,8 +54,7 @@ def submit_job(pulse_url, job_info, plugin_info, aux_files=None, auth=None):
         'AuxFiles': aux_files or [],
         'IdOnly': True
     }
-    import pprint
-    pprint.pprint(data)
+    print(data)
     resp = requests.post(url, auth=auth, data=json.dumps(data))
 
     if not resp.ok:
@@ -106,7 +104,7 @@ class DeadlineProducer(kombu.Producer):
             )
             job_info = properties.get('job_info', {}).copy()
             job_id = self._submit_deadline_job(job_info, headers)
-            print "JOBID", job_id, repr(body)
+            print "JOBID %s" % job_id
             print message
             tasks_col = get_collection(self.mongo_client)
 
@@ -120,14 +118,30 @@ class DeadlineProducer(kombu.Producer):
                 exchange, retry, retry_policy, declare, **properties)
 
     def _submit_deadline_job(self, job_info, headers):
-        group_id = headers['group']
+        values = {
+            'group_id': headers['group'] or '',
+            'root_id': headers['root_id'],
+            'task_id': headers['id'],
+            'task_name': headers['task'],
+            'task_args': headers['argsrepr'],
+            'task_kwargs': headers['kwargsrepr'],
+            'app_name': headers['task'].rsplit('.', 1)[0]
+        }
         # setup JobInfo
         job_info['Plugin'] = 'Celery'
         job_info['Frames'] = '1'
         job_info['EventOptIns'] = 'CeleryJobPurgedEvent'
-        if group_id:
-            job_info.setdefault('BatchName', 'celery-{}'.format(group_id))
-        job_info.setdefault('Name', '{task}-{id}'.format(**headers))
+
+        # set defaults
+        if values['group_id']:
+            job_info.setdefault('BatchName', 'celery-{group_id}')
+        job_info.setdefault('Name', 'celery-{task_name}-{task_id}')
+
+        # expand values:
+        job_info['Name'] = job_info['Name'].format(**values)
+        batch_name = job_info.get('BatchName')
+        if batch_name:
+            job_info['BatchName'] = batch_name.format(**values)
         return submit_job(self.deadline_pulse_url, job_info, {})
 
 
@@ -135,34 +149,21 @@ class DeadlineConsumer(kombu.Consumer):
     """
     Consumer that reads a single task then shuts down the worker
     """
-    def __init__(self, job_id, channel, *args, **kwargs):
-        self.job_id = job_id
-        self.deadline_mongo_url = kwargs.pop('deadline_mongo_url')
+    def __init__(self, raw_message, channel, *args, **kwargs):
+        self.raw_message = raw_message
         super(DeadlineConsumer, self).__init__(channel, *args, **kwargs)
-
-    @cached_property
-    def mongo_client(self):
-        return MongoClient(self.deadline_mongo_url)
 
     def consume(self, no_ack=None):
         import kombu.utils
-        tasks_col = get_collection(self.mongo_client)
-        # FIXME: get this elsewhere
-        curr_task_num = 0
-        packet_size = 1
-        # note: $slice is [skip, limit/count]
-        doc = tasks_col.find_one({'_id': ObjectId(self.job_id)},
-                                 {'tasks': {'$slice': [curr_task_num, packet_size]}})
         # override the channel so that we get a simple, consistent decoding scheme. otherwise,
         # the behavior is dependent on the channel type
         self.channel = DummyChannel()
-        for raw_str in doc['tasks']:
-            raw_message = json.loads(raw_str)
-            print "raw_message", raw_message
-            raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
-            print "running"
-            self._receive_callback(raw_message)
-            print "done receive"
+        print "raw_message"
+        print self.raw_message
+        self.raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
+        print "running"
+        self._receive_callback(self.raw_message)
+        print "done receive"
         sys.exit(0)
 
     # def _receive_callback(self, message):
@@ -181,6 +182,12 @@ class DeadlineConsumer(kombu.Consumer):
     #     self._basic_consume(queue.bind(self.channel), no_ack=no_ack, nowait=True)
 
 
+def get_message_from_env():
+    message_str = os.environ.get('CELERY_DEADLINE_MESSAGE')
+    if message_str:
+        return json.loads(base64.b64decode(message_str))
+
+
 class DeadlineAMQP(AMQP):
     @cached_property
     def mongo_url(self):
@@ -193,10 +200,9 @@ class DeadlineAMQP(AMQP):
         return
 
     def Consumer(self, *args, **kwargs):
-        job_id = os.environ.get('DEADLINE_JOB_ID')
-        if job_id:
-            kwargs['deadline_mongo_url'] = self.mongo_url
-            return DeadlineConsumer(job_id, *args, **kwargs)
+        message = get_message_from_env()
+        if message:
+            return DeadlineConsumer(message, *args, **kwargs)
         else:
             return kombu.Consumer(*args, **kwargs)
 

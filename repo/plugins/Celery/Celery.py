@@ -1,4 +1,6 @@
 import json
+import base64
+
 from System.IO import *
 from System.Text.RegularExpressions import *
 from Deadline.Plugins import *
@@ -49,7 +51,6 @@ class CeleryPlugin(DeadlinePlugin):
         self.UseProcessTree = True
         self.StdoutHandling = False
         self.PluginType = PluginType.Simple
-        self.SetEnvironmentVariable("DEADLINE_JOB_ID", str(self.GetJob().JobId))
 
     def GetCeleryTasks(self):
         collection = GetTaskCollection()
@@ -73,6 +74,7 @@ class CeleryPlugin(DeadlinePlugin):
         tasks = self.GetCeleryTasks()
         # FIXME: support packet size > 1?
         task = tasks[0]
+        self.SetEnvironmentVariable("CELERY_DEADLINE_MESSAGE", base64.b64encode(task))
         app = json.loads(task)['headers']['task'].rsplit('.', 1)[0]
         arguments = '-A %s worker -l debug -P solo --without-gossip --without-mingle --without-heartbeat' % app
         return arguments
