@@ -1,12 +1,14 @@
 from celery import Celery
 
 app = Celery('testapp')
-# app.conf.broker_url = 'redis://localhost:6379/0'
-app.conf.broker_url = "amqp://guest:guest@localhost:5672//"
-# app.conf.result_backend = 'redis://localhost:6379/0'
-app.conf.result_backend = 'mongodb://macbook-pro-4.local:27090'
 app.amqp_cls = 'celery_deadline:DeadlineAMQP'
-app.conf.deadline_pulse_url = 'http://MacBook-Pro-4.local:8082'
+app.config_from_object('celery_deadline_config')
+
+# app.conf.broker_url = 'redis://localhost:6379/0'
+# app.conf.broker_url = "amqp://guest:guest@localhost:5672//"
+# app.conf.result_backend = 'redis://localhost:6379/0'
+# app.conf.result_backend = 'mongodb://macbook-pro-4.local:27090'
+# app.conf.deadline_pulse_url = 'http://MacBook-Pro-4.local:8082'
 # app.conf.deadline_mongo_url = 'mongodb://macbook-pro-4.local:27090'
 
 # from celery_deadline import enable_deadline_support
@@ -25,16 +27,26 @@ def test():
     from celery import group, chain
 
     job_info = {'Name': '{task_name}{task_args}', 'BatchName': 'celery-{root_id}'}
-    result = chain(add.s(1, 1),
-                   add.signature((4,), job_info=job_info)).apply_async(job_info=job_info)
-    print result.get()
 
-    # job = group([add.s(2, 2), add.s(4, 4)])
-    # result = job.apply_async(job_info=job_info)
-    # print "waiting for results:"
-    # for x in result.iterate():
-    #     print "result is:", x
+    # result = chain(add.s(1, 1),
+    #                add.signature((4,), job_info=job_info)).apply_async(job_info=job_info)
+    # print result.get()
+
+    job = group([add.s(2, 2), add.s(4, 4)])
+    result = job.apply_async(job_info=job_info)
+    print "waiting for results:"
+    for x in result.iterate():
+        print "result is:", x
+
+def test2():
+    from celery_deadline import job
+    result = job('Python', '1-20,40',
+                 ScriptFile='/Users/chad/python/untitled.py',
+                 Version='2.7').apply_async()
+    print "waiting for results:"
+    for x in result.iterate():
+        print "result is:", x
 
 
 if __name__ == '__main__':
-    test()
+    test2()
