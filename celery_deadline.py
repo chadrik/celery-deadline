@@ -4,6 +4,7 @@ import os.path
 import getpass
 import json
 import base64
+from collections import deque
 
 from celery.app.task import Task
 from celery.result import ResultSet
@@ -124,7 +125,6 @@ class DeadlineProducer(kombu.Producer):
                 # setup JobInfo
                 job_info['Plugin'] = 'Celery'
                 job_info['Frames'] = '1'
-                job_info['EventOptIns'] = 'CeleryJobPurgedEvent'
 
             body, content_type, content_encoding = self._prepare(
                 body, serializer, content_type, content_encoding,
@@ -136,6 +136,7 @@ class DeadlineProducer(kombu.Producer):
             )
 
             if job_info:
+                job_info['EventOptIns'] = 'CeleryEvents'
                 job_id = self._submit_deadline_job(headers, job_info, plugin_info)
                 if group_id is None:
                     group_id = job_id
@@ -183,8 +184,8 @@ class DeadlineConsumer(kombu.Consumer):
     """
     Consumer that reads a single task then shuts down the worker
     """
-    def __init__(self, raw_message, channel, *args, **kwargs):
-        self.raw_message = raw_message
+    def __init__(self, raw_messages, channel, *args, **kwargs):
+        self.raw_messages = raw_messages
         super(DeadlineConsumer, self).__init__(channel, *args, **kwargs)
 
     def consume(self, no_ack=None):
@@ -192,12 +193,13 @@ class DeadlineConsumer(kombu.Consumer):
         # override the channel so that we get a simple, consistent decoding scheme. otherwise,
         # the behavior is dependent on the channel type
         self.channel = DummyChannel()
-        print "raw_message"
-        print self.raw_message
-        self.raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
-        print "running"
-        self._receive_callback(self.raw_message)
-        print "done receive"
+        for raw_message in self.raw_messages:
+            print "raw_message"
+            print raw_message
+            raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
+            print "running"
+            self._receive_callback(raw_message)
+            print "done receive"
         sys.exit(0)
 
     # def _receive_callback(self, message):
@@ -216,13 +218,24 @@ class DeadlineConsumer(kombu.Consumer):
     #     self._basic_consume(queue.bind(self.channel), no_ack=no_ack, nowait=True)
 
 
-def get_message_from_env():
-    message_str = os.environ.get('CELERY_DEADLINE_MESSAGE')
-    if message_str:
-        return json.loads(base64.b64decode(message_str))
-
-
 class DeadlineAMQP(AMQP):
+    def set_messages_and_values(self, messages, values):
+        assert len(messages) == len(values)
+        self.app.deadline_messages = messages
+        self.app.deadline_values = deque(values)
+
+    def get_messages(self):
+        messages = getattr(self.app, 'deadline_messages', None)
+        if messages is not None:
+            return messages
+        num_messages = os.environ.get('CELERY_DEADLINE_NUM_MESSAGES')
+        if num_messages:
+            messages = []
+            for i in range(int(num_messages)):
+                message_str = os.environ['CELERY_DEADLINE_MESSAGE%d' % i]
+                messages.append(json.loads(base64.b64decode(message_str)))
+            return messages
+
     @cached_property
     def mongo_url(self):
         conf = self.app.conf
@@ -234,10 +247,10 @@ class DeadlineAMQP(AMQP):
         return
 
     def Consumer(self, *args, **kwargs):
-        message = get_message_from_env()
-        if message:
+        messages = self.get_messages()
+        if messages is not None:
             print("USING DEADLINE CONSUMER")
-            return DeadlineConsumer(message, *args, **kwargs)
+            return DeadlineConsumer(messages, *args, **kwargs)
         else:
             print("USING KOMBU CONSUMER")
             return kombu.Consumer(*args, **kwargs)
@@ -292,8 +305,19 @@ app = Celery('celery_deadline')
 app.amqp_cls = 'celery_deadline:DeadlineAMQP'
 app.config_from_object('celery_deadline_config')
 
-@app.task
-def plugin_task(plugin, frames, frame, index):
+
+class JobDeletedError(Exception):
+    pass
+
+
+@app.task(bind=True)
+def plugin_task(self, plugin, frames, frame, index):
+    # values = getattr(self.app, 'deadline_values', None)
+    # if values is not None:
+    #     return values.popleft()
+    mode = os.environ.get('CELERY_DEADLINE_MODE')
+    if mode == 'delete':
+        raise JobDeletedError()
     return frame
 
 
@@ -301,14 +325,23 @@ def job(plugin, frames, **plugin_info):
     deadline_group_id = ObjectId()
     return group(
         [plugin_task.signature((plugin, frames, frame, i),
-                              plugin_info=plugin_info,
-                              deadline_group_id=deadline_group_id)
+                               plugin_info=plugin_info,
+                               deadline_group_id=deadline_group_id)
          for i, frame in enumerate(parse_frames(frames))])
 
 
-def set_task_result(value):
+def process_task_messages(messages, values):
+    from celery.bin.worker import worker
+    app.amqp.set_messages_and_values(messages, values)
+    args = '-A %s -l debug -P solo --without-gossip --without-mingle --without-heartbeat' % __name__
+    w = worker(app)
+    #     app=self.app, on_error=self.on_error,
+    #     no_color=self.no_color, quiet=self.quiet,
+    #     on_usage_error=partial(self.on_usage_error, command=command),
+    # ).run_from_argv(self.prog_name, argv[1:], command=argv[0])
+    w.run_from_argv('celery', args.split(), command='worker')
     # get celery task_id for current frame
-    frame_id = _get_deadline_task_id(task_id, frame)
+    # frame_id = _get_deadline_task_id(task_id, frame)
 
 
 # TODO: create a plugin that returns registered OutputFilenames as results. Example:

@@ -1,10 +1,10 @@
-import json
-import base64
-
 from System.IO import *
 from System.Text.RegularExpressions import *
 from Deadline.Plugins import *
 
+# --
+import json
+import base64
 from Deadline.Scripting import ClientUtils, RepositoryUtils
 from MongoDB.Driver import MongoClient
 from MongoDB.Driver.Builders import Query, Fields
@@ -48,6 +48,7 @@ def GetCeleryArguments(plugin):
     # plugin.SetEnvironmentVariable("CELERY_DEADLINE_MESSAGE", base64.b64encode(task))
     app = json.loads(task)['headers']['task'].rsplit('.', 1)[0]
     return '-A %s worker -l debug -P solo --without-gossip --without-mingle --without-heartbeat' % app
+# --
 
 
 def GetDeadlinePlugin():

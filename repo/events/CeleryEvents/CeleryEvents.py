@@ -1,4 +1,4 @@
-from __future__ import absolute_import, print_function
+from Deadline.Events import DeadlineEventListener
 
 # --
 import json
@@ -66,31 +66,42 @@ def ExecuteTasks(plugin, tasks, mode='execute'):
 # --
 
 
-def PostRenderTasks(plugin):
-    def callback():
-        frames = list(plugin.GetCurrentTask().TaskFrameList)
-        tasks = GetCeleryTasks(plugin.GetJob(), frames)
-        ExecuteTasks(plugin, tasks)
-
-        # FIXME: this?
-        # del plugin.PostRenderTasksCallback
-
-    # def callback():
-    #     import celery_deadline
-    #     tasks = GetCeleryTasks(deadlinePlugin)
-    #     deadlinePlugin.LogInfo("Running celery callback")
-    #     values = ['a'] * len(tasks)
-    #     celery_deadline.process_task_messages(tasks, values)
-
-    return callback
+def GetIncompleteFrames(job):
+    # second argument is invalidate. not sure if it's necessary to invalidate the cache
+    tasks = RepositoryUtils.GetJobTasks(job, False).TaskCollectionTasks
+    incomplete = []
+    for task in tasks:
+        if task.TaskStatus != 'Done':
+            incomplete.extend(list(task.TaskFrameList))
+    return incomplete
 
 
-def __main__(deadlinePlugin):
-    job = deadlinePlugin.GetJob()
+def GetDeadlineEventListener():
+    return CeleryEvents()
 
-    deadlinePlugin.LogInfo("args INFO %s" % job.GetJobExtraInfoKeyValue('celery_id'))
-    deadlinePlugin.LogInfo("JobName: %s" % job.JobName)
-    deadlinePlugin.LogInfo("JobId: %s" % job.JobId)
 
-    # FIXME: remove this callback on cleanup?
-    deadlinePlugin.PostRenderTasksCallback += PostRenderTasks(deadlinePlugin)
+def CleanupDeadlineEventListener(deadlinePlugin):
+    deadlinePlugin.Cleanup()
+
+
+class CeleryEvents(DeadlineEventListener):
+    def __init__(self):
+        self.OnJobPurgedCallback += self.OnJobPurged
+        self.OnJobDeletedCallback += self.OnJobDeleted
+
+    def Cleanup(self):
+        del self.OnJobPurgedCallback
+        del self.OnJobDeletedCallback
+
+    def OnJobPurged(self, job):
+        print("RUNNING PURGE ------------")
+        collection = GetTaskCollection()
+        id = GetCeleryGroupId(job)
+        query = Query.EQ('_id', id)
+        collection.deleteOne(query)
+
+    def OnJobDeleted(self, job):
+        print("RUNNING DELETE ------------")
+        frames = GetIncompleteFrames(job)
+        tasks = GetCeleryTasks(job, frames)
+        ExecuteTasks(self, tasks, mode='delete')
