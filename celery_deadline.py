@@ -30,16 +30,29 @@ from bson.objectid import ObjectId
 #               {group}                 tasks in the same group in one job
 
 
-def enable_deadline_support(app, mongodb):
+def configure(app, config_object='celery_deadline_config'):
+    """
+    Configure a celery app to be executed on Deadline
+    """
     app.amqp_cls = __name__ + ':DeadlineAMQP'
+    if config_object is not None:
+        app.config_from_object(config_object)
 
 
-def get_collection(client):
+def _mongo_collection(client):
     return client['celery_deadline']['job_tasks']
 
 
-# override the base virtual channel so that it doesn't use the connection object.  we use this
-# for converting to and from Message objects.
+def _unused_plugin_key(job_info):
+    i = 0
+    while True:
+        key = 'ExtraInfoKeyValue%d' % i
+        if key not in job_info:
+            return key
+
+
+# override the base virtual channel so that it doesn't use the connection
+# object.  we use this for converting to and from Message objects.
 class DummyChannel(base.Channel):
     def __init__(self, *args, **kwargs):
         pass
@@ -88,7 +101,7 @@ class DeadlineProducer(kombu.Producer):
                 retry_policy=None, declare=None, expiration=None,
                 **properties):
         # FIXME:
-        # detect if deadline was requested based on properties. 
+        # detect if deadline was requested based on properties.
         # maybe this doubles as way of passing pulse URL?
         deadline_requested = True
         if deadline_requested and self.deadline_pulse_url and self.deadline_mongo_url:
@@ -99,30 +112,31 @@ class DeadlineProducer(kombu.Producer):
             plugin_info = properties.get('plugin_info', {}).copy()
             group_id = properties.pop('deadline_group_id', None)
 
+            # copied from Producer.publish:
             if expiration is not None:
                 properties['expiration'] = str(int(expiration * 1000))
 
+            # setup job_info:
             if headers['task'] == __name__ + '.plugin_task':
+                # a special celery task that proxies a task for a Deadline job
                 plugin, frames, frame, index = body[0]
-                if index != 0:
-                    # don't submit to deadline
-                    job_info = None
-                else:
+                if index == 0:
+                    # first task, setup to submit to Deadline
                     assert group_id is not None
                     job_info['Plugin'] = plugin
                     job_info['Frames'] = frames
-
-                    i = 0
-                    while True:
-                        key = 'ExtraInfoKeyValue%d' % i
-                        if key not in job_info:
-                            job_info[key] = 'celery_id=%s' % group_id
-                            break
+                    # store the group_id, which is used to retrieve the
+                    # celery tasks for the job.
+                    key = _unused_plugin_key(plugin_info)
+                    job_info[key] = 'celery_id=%s' % group_id
+                else:
+                    # don't submit to Deadline
+                    job_info = None
 
                 print repr(body)
                 print properties
             else:
-                # setup JobInfo
+                # a celery task to execute on Deadline
                 job_info['Plugin'] = 'Celery'
                 job_info['Frames'] = '1'
 
@@ -136,21 +150,31 @@ class DeadlineProducer(kombu.Producer):
             )
 
             if job_info:
+                # submit to Deadline!
                 job_info['EventOptIns'] = 'CeleryEvents'
-                job_id = self._submit_deadline_job(headers, job_info, plugin_info)
+                job_id = self._submit_deadline_job(headers, job_info,
+                                                   plugin_info)
                 if group_id is None:
+                    # when no group_id is provided, the job_id is used as a
+                    # fallback.  group_id is used for plugin_tasks because of
+                    # the fact that only the first plugin_task in a job
+                    # triggers a Deadline submission, and therefore only the
+                    # first task has easy access to the job_id. providing an
+                    # explicit group_id to all plugin_task's avoids the need
+                    # to devise a system to share the job_id with subsequent
+                    # tasks.
                     group_id = job_id
-
                 print "JOBID %s" % job_id
+
             print message
-            tasks_col = get_collection(self.mongo_client)
+            tasks_col = _mongo_collection(self.mongo_client)
 
             tasks_col.update_one({"_id": ObjectId(group_id)},
                                  {"$push": {"tasks": json.dumps(message)}},
                                  upsert=True)
         else:
             return super(DeadlineProducer, self).publish(
-                body, routing_key, delivery_mode, mandatory, immediate, priority, 
+                body, routing_key, delivery_mode, mandatory, immediate, priority,
                 content_type, content_encoding, serializer, headers, compression,
                 exchange, retry, retry_policy, declare, **properties)
 
@@ -182,7 +206,8 @@ class DeadlineProducer(kombu.Producer):
 
 class DeadlineConsumer(kombu.Consumer):
     """
-    Consumer that reads a single task then shuts down the worker
+    Consumer that reads a set of passed task messages then shuts down the
+    worker.
     """
     def __init__(self, raw_messages, channel, *args, **kwargs):
         self.raw_messages = raw_messages
@@ -190,8 +215,8 @@ class DeadlineConsumer(kombu.Consumer):
 
     def consume(self, no_ack=None):
         import kombu.utils
-        # override the channel so that we get a simple, consistent decoding scheme. otherwise,
-        # the behavior is dependent on the channel type
+        # override the channel so that we get a simple, consistent decoding
+        # scheme. otherwise, the behavior is dependent on the channel type
         self.channel = DummyChannel()
         for raw_message in self.raw_messages:
             print "raw_message"
@@ -200,6 +225,7 @@ class DeadlineConsumer(kombu.Consumer):
             print "running"
             self._receive_callback(raw_message)
             print "done receive"
+        # shut down the worker
         sys.exit(0)
 
     # def _receive_callback(self, message):
@@ -219,6 +245,11 @@ class DeadlineConsumer(kombu.Consumer):
 
 
 class DeadlineAMQP(AMQP):
+    """
+    Patched AMQP class which is used to intercept published celery tasks and
+    send them to Deadline (via Mongo), and within a Deadline task to consume
+    intercepted tasks.
+    """
     def set_messages_and_values(self, messages, values):
         assert len(messages) == len(values)
         self.app.deadline_messages = messages
@@ -299,6 +330,7 @@ def _get_deadline_task_id(parent_task_id, frame):
 #         return ResultSet(results, app=self.app)
 
 
+# FIXME: look into global tasks, which get added to all apps automatically
 import re
 from celery import Celery, group
 app = Celery('celery_deadline')
@@ -312,16 +344,48 @@ class JobDeletedError(Exception):
 
 @app.task(bind=True)
 def plugin_task(self, plugin, frames, frame, index):
+    """
+    Place-holder task that represents a single task in Deadline plugin-based
+    job.
+
+    The task's purpose is to hold information used to submit a job to Deadline
+    and to allow results to be retrieved from the celery results backend as
+    their corresponding Deadline tasks complete.
+
+    See `celery_deadline.job()`
+    """
     # values = getattr(self.app, 'deadline_values', None)
     # if values is not None:
     #     return values.popleft()
-    mode = os.environ.get('CELERY_DEADLINE_MODE')
-    if mode == 'delete':
-        raise JobDeletedError()
+    # mode = os.environ.get('CELERY_DEADLINE_MODE')
+    # if mode == 'delete':
+    #     raise JobDeletedError()
     return frame
 
 
+@app.task
+def _deleted_failure():
+    """
+    task which is patched in on Deadline to fail incomplete
+    tasks when a Deadline job is dumped.
+    """
+    raise JobDeletedError()
+
+
 def job(plugin, frames, **plugin_info):
+    """
+    Create a group of tasks for executing each of the frame packets for
+    the given Deadline plugin.
+
+    Parameters
+    ----------
+    plugin : str
+    frames : str
+
+    Returns
+    -------
+    celery.group
+    """
     deadline_group_id = ObjectId()
     return group(
         [plugin_task.signature((plugin, frames, frame, i),
@@ -333,7 +397,8 @@ def job(plugin, frames, **plugin_info):
 def process_task_messages(messages, values):
     from celery.bin.worker import worker
     app.amqp.set_messages_and_values(messages, values)
-    args = '-A %s -l debug -P solo --without-gossip --without-mingle --without-heartbeat' % __name__
+    args = '-A %s -l debug -P solo --without-gossip --without-mingle ' \
+           '--without-heartbeat' % __name__
     w = worker(app)
     #     app=self.app, on_error=self.on_error,
     #     no_color=self.no_color, quiet=self.quiet,

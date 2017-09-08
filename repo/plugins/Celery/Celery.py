@@ -5,6 +5,7 @@ from Deadline.Plugins import *
 # --
 import json
 import base64
+
 from Deadline.Scripting import ClientUtils, RepositoryUtils
 from MongoDB.Driver import MongoClient
 from MongoDB.Driver.Builders import Query, Fields
@@ -20,15 +21,19 @@ def GetTaskCollection():
     return db.GetCollection('job_tasks')
 
 
-def GetCeleryTasks(plugin):
-    job = plugin.GetJob()
-    task = plugin.GetCurrentTask()
-    collection = GetTaskCollection()
+def GetCeleryGroupId(job):
     groupIdStr = job.GetJobExtraInfoKeyValueWithDefault('celery_id', job.JobId)
-    groupId = BsonObjectId(ObjectId.Parse(groupIdStr))
+    return BsonObjectId(ObjectId.Parse(groupIdStr))
+
+
+def GetCeleryTasks(job, frames):
+    """
+    Get raw celery task messages for the current deadline task.
+    """
+    collection = GetTaskCollection()
+    groupId = GetCeleryGroupId(job)
     query = Query.EQ('_id', groupId)
     allFrames = list(job.JobFramesList)
-    frames = list(task.TaskFrameList)
     currentFrame = frames[0]
     index = allFrames.index(currentFrame)
     packetSize = len(frames)
@@ -40,14 +45,36 @@ def GetCeleryTasks(plugin):
     return results
 
 
-def GetCeleryArguments(plugin):
-    tasks = GetCeleryTasks(plugin)
-    # FIXME: support packet size > 1?
-    task = tasks[0]
-    plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MESSAGE", base64.b64encode(task))
-    # plugin.SetEnvironmentVariable("CELERY_DEADLINE_MESSAGE", base64.b64encode(task))
-    app = json.loads(task)['headers']['task'].rsplit('.', 1)[0]
+def GetCeleryArguments(plugin, tasks, mode='execute'):
+    plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_NUM_MESSAGES", str(len(tasks)))
+    apps = []
+    for i, task_message in enumerate(tasks):
+        task = json.loads(task_message)
+        if mode == 'delete':
+            # patch the task message so that it fails
+            body = json.loads(task['body'])
+            body[0] = []
+            body[1] = {}
+            task['body'] = json.dumps(body)
+            task['headers']['task'] = 'celery_deadline._on_job_deleted'
+            task_message = json.dumps(task)
+        plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MESSAGE%d" % i,
+                                             base64.b64encode(task_message))
+        # plugin.SetEnvironmentVariable("CELERY_DEADLINE_MESSAGE", base64.b64encode(task))
+        apps.append(task['headers']['task'].rsplit('.', 1)[0])
+
+    assert len(set(apps)) == 1, "Tasks span more than one celery app"
+    app = apps[0]
     return '-A %s worker -l debug -P solo --without-gossip --without-mingle --without-heartbeat' % app
+
+
+def ExecuteTasks(plugin, tasks, mode='execute'):
+    args = GetCeleryArguments(plugin, tasks, mode)
+    plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MODE", mode)
+    plugin.LogInfo("Running celery callback")
+    plugin.RunProcess('celery', args, '', -1)
+    # not available on DeadlineEventListener:
+    # plugin.StartMonitoredProgram('celery', 'celery', args, '')
 # --
 
 
@@ -87,4 +114,6 @@ class CeleryPlugin(DeadlinePlugin):
         return 'celery'
 
     def RenderArgument(self):
-        return GetCeleryArguments(self)
+        frames = list(self.GetCurrentTask().TaskFrameList)
+        tasks = GetCeleryTasks(self.GetJob(), frames)
+        return GetCeleryArguments(self, tasks)

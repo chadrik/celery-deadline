@@ -43,13 +43,23 @@ def GetCeleryTasks(job, frames):
     return results
 
 
-def GetCeleryArguments(tasks, plugin):
+def GetCeleryArguments(plugin, tasks, mode='execute'):
     plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_NUM_MESSAGES", str(len(tasks)))
     apps = []
-    for i, task in enumerate(tasks):
-        plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MESSAGE%d" % i, base64.b64encode(task))
+    for i, task_message in enumerate(tasks):
+        task = json.loads(task_message)
+        if mode == 'delete':
+            # patch the task message so that it fails
+            body = json.loads(task['body'])
+            body[0] = []
+            body[1] = {}
+            task['body'] = json.dumps(body)
+            task['headers']['task'] = 'celery_deadline._on_job_deleted'
+            task_message = json.dumps(task)
+        plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MESSAGE%d" % i,
+                                             base64.b64encode(task_message))
         # plugin.SetEnvironmentVariable("CELERY_DEADLINE_MESSAGE", base64.b64encode(task))
-        apps.append(json.loads(task)['headers']['task'].rsplit('.', 1)[0])
+        apps.append(task['headers']['task'].rsplit('.', 1)[0])
 
     assert len(set(apps)) == 1, "Tasks span more than one celery app"
     app = apps[0]
@@ -57,7 +67,7 @@ def GetCeleryArguments(tasks, plugin):
 
 
 def ExecuteTasks(plugin, tasks, mode='execute'):
-    args = GetCeleryArguments(tasks, plugin)
+    args = GetCeleryArguments(plugin, tasks, mode)
     plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MODE", mode)
     plugin.LogInfo("Running celery callback")
     plugin.RunProcess('celery', args, '', -1)
@@ -86,11 +96,23 @@ def PostRenderTasks(plugin):
 
 
 def __main__(deadlinePlugin):
+    """
+    Patch Deadline plugins submitted using `celery_deadline.job()` to run their
+    celery task after the Deadline task completes.
+
+    In the default case, the execution of `celery_deadline.plugin_task` sends
+    a simple pre-determined result (the completed frame or output paths) to
+    the celery results backend for consumption by clients waiting on
+    the job.  Eventually we will support allowing Deadine tasks to send custom
+    results.
+    """
     job = deadlinePlugin.GetJob()
 
-    deadlinePlugin.LogInfo("args INFO %s" % job.GetJobExtraInfoKeyValue('celery_id'))
+    celery_id = job.GetJobExtraInfoKeyValue('celery_id')
+    deadlinePlugin.LogInfo("args INFO %s" % celery_id)
     deadlinePlugin.LogInfo("JobName: %s" % job.JobName)
     deadlinePlugin.LogInfo("JobId: %s" % job.JobId)
 
-    # FIXME: remove this callback on cleanup?
-    deadlinePlugin.PostRenderTasksCallback += PostRenderTasks(deadlinePlugin)
+    if celery_id:
+        # FIXME: remove this callback on cleanup?
+        deadlinePlugin.PostRenderTasksCallback += PostRenderTasks(deadlinePlugin)

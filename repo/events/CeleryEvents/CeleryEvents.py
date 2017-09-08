@@ -43,13 +43,23 @@ def GetCeleryTasks(job, frames):
     return results
 
 
-def GetCeleryArguments(tasks, plugin):
+def GetCeleryArguments(plugin, tasks, mode='execute'):
     plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_NUM_MESSAGES", str(len(tasks)))
     apps = []
-    for i, task in enumerate(tasks):
-        plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MESSAGE%d" % i, base64.b64encode(task))
+    for i, task_message in enumerate(tasks):
+        task = json.loads(task_message)
+        if mode == 'delete':
+            # patch the task message so that it fails
+            body = json.loads(task['body'])
+            body[0] = []
+            body[1] = {}
+            task['body'] = json.dumps(body)
+            task['headers']['task'] = 'celery_deadline._on_job_deleted'
+            task_message = json.dumps(task)
+        plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MESSAGE%d" % i,
+                                             base64.b64encode(task_message))
         # plugin.SetEnvironmentVariable("CELERY_DEADLINE_MESSAGE", base64.b64encode(task))
-        apps.append(json.loads(task)['headers']['task'].rsplit('.', 1)[0])
+        apps.append(task['headers']['task'].rsplit('.', 1)[0])
 
     assert len(set(apps)) == 1, "Tasks span more than one celery app"
     app = apps[0]
@@ -57,7 +67,7 @@ def GetCeleryArguments(tasks, plugin):
 
 
 def ExecuteTasks(plugin, tasks, mode='execute'):
-    args = GetCeleryArguments(tasks, plugin)
+    args = GetCeleryArguments(plugin, tasks, mode)
     plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MODE", mode)
     plugin.LogInfo("Running celery callback")
     plugin.RunProcess('celery', args, '', -1)
@@ -67,7 +77,7 @@ def ExecuteTasks(plugin, tasks, mode='execute'):
 
 
 def GetIncompleteFrames(job):
-    # second argument is invalidate. not sure if it's necessary to invalidate the cache
+    # second argument is invalidate. not sure if it's necessary
     tasks = RepositoryUtils.GetJobTasks(job, False).TaskCollectionTasks
     incomplete = []
     for task in tasks:
@@ -104,4 +114,5 @@ class CeleryEvents(DeadlineEventListener):
         print("RUNNING DELETE ------------")
         frames = GetIncompleteFrames(job)
         tasks = GetCeleryTasks(job, frames)
+        # FIXME: this only works for celery_deadline.plugin_task.  we need a general solution
         ExecuteTasks(self, tasks, mode='delete')
