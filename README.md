@@ -51,15 +51,37 @@ print(result.get())
 
 ## Submit Deadline jobs using celery
 
-You can also bring Deadline jobs into celery (such as the stock MayaCmd, Arnold, and Nuke plugins).
+You can also submit and wait for Deadline jobs using celery (such as the stock MayaCmd, Arnold, and Nuke plugins).
 To do so, use `celery_deadline.job()` to create a group of celery tasks that proxy
 Deadline tasks and wait for their results:
 
+```python
+from celery_deadline import job
+result = job('Python', '1-5,40',
+             ScriptFile='/Users/chad/python/untitled.py',
+             Version='2.7').apply_async()
 
-By default, the value returned by each task is the list of output paths configured for the job.
-However, it is possible to return any result you wish.
+for x in result.iterate(propagate=False):
+    print("result is: %s" % x)
+```
+
+By default, the value returned by each task is the task's frame (eventually will default to list of output paths configured for the job, or custom values).
 
 
 All the usual celery [canvas primitives](http://docs.celeryproject.org/en/latest/userguide/canvas.html)
-are supported, so you can group and chain tasks together, mixing normal celery tasks with those
-backed by Deadline.
+are supported, so you can group and chain tasks together, mixing celery tasks executing on Deadline with tasks executed on celery workers.
+
+## Setup
+
+- Copy or link the "repo" directory of this project to the "custom" sub-directory of the Deadline repository directory. 
+- Start the DeadlineWebService
+- Start one or more slaves, and make sure that they have the ability to import the `celery_deadline` module
+- Start the Monitor
+  - Goto `Tools -> Super User Mode`
+  - Goto `Tools -> Configure Repository Options...`
+    - Under `House Cleaning`, check `Asynchronous Job Events`
+- Start your celery results backend (i.e. redis or rabbitmq)
+- Start a celery worker:
+  ```
+  celery -A celery_deadline worker -n 'w1@%h'
+  ```

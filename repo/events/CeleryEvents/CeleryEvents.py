@@ -43,8 +43,14 @@ def GetCeleryTasks(job, frames):
     return results
 
 
-def GetCeleryArguments(plugin, tasks, mode='execute'):
-    plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_NUM_MESSAGES", str(len(tasks)))
+def GetCeleryArguments(plugin, tasks, mode='execute', usingRunProcess=True):
+    plugin.LogInfo('CELERY: setting up %d tasks' % len(tasks))
+    # FIXME: for the Celery plugin, SetEnvironmentVariable seems to be required
+    if usingRunProcess:
+        setenv = plugin.SetProcessEnvironmentVariable
+    else:
+        setenv = plugin.SetEnvironmentVariable
+    setenv("CELERY_DEADLINE_NUM_MESSAGES", str(len(tasks)))
     apps = []
     for i, task_message in enumerate(tasks):
         task = json.loads(task_message)
@@ -56,20 +62,19 @@ def GetCeleryArguments(plugin, tasks, mode='execute'):
             task['body'] = json.dumps(body)
             task['headers']['task'] = 'celery_deadline._on_job_deleted'
             task_message = json.dumps(task)
-        plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MESSAGE%d" % i,
-                                             base64.b64encode(task_message))
-        # plugin.SetEnvironmentVariable("CELERY_DEADLINE_MESSAGE", base64.b64encode(task))
+        setenv("CELERY_DEADLINE_MESSAGE%d" % i, base64.b64encode(task_message))
         apps.append(task['headers']['task'].rsplit('.', 1)[0])
 
     assert len(set(apps)) == 1, "Tasks span more than one celery app"
     app = apps[0]
-    return '-A %s worker -l debug -P solo --without-gossip --without-mingle --without-heartbeat' % app
+    return '-A %s worker -l debug -P solo --without-gossip --without-mingle ' \
+           '--without-heartbeat' % app
 
 
 def ExecuteTasks(plugin, tasks, mode='execute'):
     args = GetCeleryArguments(plugin, tasks, mode)
     plugin.SetProcessEnvironmentVariable("CELERY_DEADLINE_MODE", mode)
-    plugin.LogInfo("Running celery callback")
+    plugin.LogInfo("CELERY: Running callback")
     plugin.RunProcess('celery', args, '', -1)
     # not available on DeadlineEventListener:
     # plugin.StartMonitoredProgram('celery', 'celery', args, '')
@@ -104,15 +109,17 @@ class CeleryEvents(DeadlineEventListener):
         del self.OnJobDeletedCallback
 
     def OnJobPurged(self, job):
-        print("RUNNING PURGE ------------")
+        self.LogInfo("CELERY: RUNNING PURGE ------------")
         collection = GetTaskCollection()
         id = GetCeleryGroupId(job)
         query = Query.EQ('_id', id)
         collection.deleteOne(query)
 
     def OnJobDeleted(self, job):
-        print("RUNNING DELETE ------------")
+        self.LogInfo("CELERY: RUNNING DELETE ------------")
         frames = GetIncompleteFrames(job)
         tasks = GetCeleryTasks(job, frames)
+        if not tasks:
+            self.LogInfo("CELERY: No tasks found")
         # FIXME: this only works for celery_deadline.plugin_task.  we need a general solution
         ExecuteTasks(self, tasks, mode='delete')

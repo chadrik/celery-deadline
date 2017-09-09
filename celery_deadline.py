@@ -100,13 +100,16 @@ class DeadlineProducer(kombu.Producer):
                 headers=None, compression=None, exchange=None, retry=False,
                 retry_policy=None, declare=None, expiration=None,
                 **properties):
+        headers = {} if headers is None else headers
+
         # FIXME:
         # detect if deadline was requested based on properties.
         # maybe this doubles as way of passing pulse URL?
-        deadline_requested = True
-        if deadline_requested and self.deadline_pulse_url and self.deadline_mongo_url:
+        is_task = 'task' in headers
+        is_builtin = is_task and headers['task'].split('.')[0] == 'celery'
+        deadline_requested = not is_builtin
+        if is_task and deadline_requested and self.deadline_pulse_url and self.deadline_mongo_url:
             channel = DummyChannel()
-            headers = {} if headers is None else headers
             compression = self.compression if compression is None else compression
             job_info = properties.get('job_info', {}).copy()
             plugin_info = properties.get('plugin_info', {}).copy()
@@ -132,9 +135,6 @@ class DeadlineProducer(kombu.Producer):
                 else:
                     # don't submit to Deadline
                     job_info = None
-
-                print repr(body)
-                print properties
             else:
                 # a celery task to execute on Deadline
                 job_info['Plugin'] = 'Celery'
@@ -148,6 +148,8 @@ class DeadlineProducer(kombu.Producer):
                 body, priority, content_type,
                 content_encoding, headers, properties,
             )
+            print "-" * 30
+            print message
 
             if job_info:
                 # submit to Deadline!
@@ -165,8 +167,7 @@ class DeadlineProducer(kombu.Producer):
                     # tasks.
                     group_id = job_id
                 print "JOBID %s" % job_id
-
-            print message
+            print("Inserting data into mongo using %s" % group_id)
             tasks_col = _mongo_collection(self.mongo_client)
 
             tasks_col.update_one({"_id": ObjectId(group_id)},
@@ -364,7 +365,7 @@ def plugin_task(self, plugin, frames, frame, index):
 
 
 @app.task
-def _deleted_failure():
+def _on_job_deleted():
     """
     task which is patched in on Deadline to fail incomplete
     tasks when a Deadline job is dumped.
