@@ -3,7 +3,7 @@
 
 Use Deadline as a celery worker, and intermix Deadline and celery tasks.
 
-Celery is insanely popular in the python programming world, with over 7,500 stars on github and 2,500 it’s one of the more popular projects on all of github.  Celery’s strengths compared to Deadline lie in the incredibly low startup overhead per task and the ability to pass results between tasks.  It is nowhere near as feature-rich as Deadline or suitable for long-running tasks common in VFX and animation, but harnessing the two together for different types of tasks, and allowing results to pass through networks of tasks (including Deadline tasks) can be incredibly powerful.
+[Celery](http://www.celeryproject.org/) is insanely popular in the python programming world, with over 7,500 stars on github and 2,500 forks it’s one of the more popular projects on all of github.  Celery’s strengths compared to Deadline lie in the incredibly low startup overhead per task and the ability to pass results between tasks.  It is nowhere near as feature-rich as Deadline or suitable for long-running tasks common in VFX and animation, but harnessing the two together for different types of tasks, and allowing results to pass through networks of tasks (including Deadline tasks) can be incredibly powerful.
 
 Feature | Deadline | Celery
 --- | --- | ---
@@ -15,7 +15,7 @@ Feature | Deadline | Celery
 **Task dependencies** | yes | yes
 **Tasks can return results** | no | yes
 
-## Why this a good thing
+## Why use Celery with Deadline?
 
 ### Return results from Deadline tasks
 
@@ -56,12 +56,12 @@ Tasks are then submitted to Deadline using celery, and results are returned as t
 ```python
 from testapp import add
 # submit to Deadline
-result = add.delay(2, 2)
+result = add.delay(2, 2, job_info={})
 # wait for the result
 print(result.get())
 ```
 
-## Submit Deadline jobs using celery
+### Submit Deadline jobs using celery
 
 You can also submit and wait for Deadline jobs using celery (such as the stock MayaCmd, Arnold, and Nuke plugins).
 To do so, use `celery_deadline.job()` to create a group of celery tasks that proxy
@@ -93,7 +93,7 @@ are supported, so you can group and chain tasks together, mixing celery tasks ex
   - Goto `Tools -> Configure Repository Options...`
     - Under `House Cleaning`, check `Asynchronous Job Events`
 - Start your celery results backend (i.e. redis or rabbitmq)
-- Start a celery worker:
+- Start a celery worker for your app:
   ```
-  celery -A celery_deadline worker -n 'w1@%h'
+  celery -A testapp worker -n 'w1@%h'
   ```
