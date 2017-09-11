@@ -3,11 +3,13 @@
 
 Use Deadline as a celery worker, and intermix Deadline and celery tasks.
 
-[Celery](http://www.celeryproject.org/) is insanely popular in the python programming world, with over 7,500 stars on github and 2,500 forks it’s one of the more popular projects on all of github.  Celery’s strengths compared to Deadline lie in the incredibly low startup overhead per task and the ability to pass results between tasks.  It is nowhere near as feature-rich as Deadline or suitable for long-running tasks common in VFX and animation, but harnessing the two together for different types of tasks, and allowing results to pass through networks of tasks (including Deadline tasks) can be incredibly powerful.
+[Celery](http://www.celeryproject.org/) is insanely popular in the python programming world, with over 7,500 stars on github and 2,500 forks it’s one of the more popular projects on all of github.  Celery’s strengths lie in its speed -- each task has an incredibly low startup overhead, and many tasks can be run in parallel -- as well as its ability to pass results between tasks.  It is nowhere near as feature-rich as Deadline, nor is it well-suited to the long-running tasks common in VFX and animation, but harnessing the two task queues together for different types of tasks, and allowing results to pass through networks of tasks can be incredibly powerful.
+
+Here's a brief feature comparison:
 
 Feature | Deadline | Celery
 --- | --- | ---
-**Terminology** | slave, job, task | worker, group, task
+**Terminology** | slave, job, task, plugin | worker, group, task, app
 **Worker environment** | dynamic per job/task | immutable per worker 
 **Task startup time** | non-trivial | instant
 **Monitoring** | sophisticated native app | basic web app
@@ -33,7 +35,7 @@ Unlike Deadline's dependency system, passing results through a network of celery
 
 There are two use cases:  
 - submit celery tasks to Deadline
-- wrap Deadline tasks in celery tasks
+- wrap Deadline tasks in celery tasks (to monitor results or network with other celery tasks)
   
 ### Execute celery tasks using Deadline
 
