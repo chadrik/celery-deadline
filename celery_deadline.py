@@ -1,3 +1,5 @@
+from __future__ import print_function, absolute_import
+import re
 import sys
 import os
 import os.path
@@ -5,10 +7,6 @@ import getpass
 import json
 import base64
 from collections import deque
-
-from celery.app.task import Task
-from celery.result import ResultSet
-from kombu.utils.uuid import uuid
 
 from celery.app.amqp import AMQP
 import kombu
@@ -30,6 +28,17 @@ from bson.objectid import ObjectId
 #               {group}                 tasks in the same group in one job
 
 
+_frame_regex = None
+
+
+class PulseRequestError(Exception):
+    pass
+
+
+class JobDeletedError(Exception):
+    pass
+
+
 def configure(app, config_object='celery_deadline_config'):
     """
     Configure a celery app to be executed on Deadline
@@ -39,23 +48,50 @@ def configure(app, config_object='celery_deadline_config'):
         app.config_from_object(config_object)
 
 
-def _mongo_collection(client):
-    return client['celery_deadline']['job_tasks']
+# general deadline utils --
 
-
-def _unused_plugin_key(job_info):
+def set_extra_info(job_info, key, value):
     i = 0
     while True:
-        key = 'ExtraInfoKeyValue%d' % i
-        if key not in job_info:
-            return key
+        ikey = 'ExtraInfoKeyValue%d' % i
+        if ikey not in job_info:
+            job_info[ikey] = '%s=%s' % (key, value)
+            return ikey
 
 
-# override the base virtual channel so that it doesn't use the connection
-# object.  we use this for converting to and from Message objects.
-class DummyChannel(base.Channel):
-    def __init__(self, *args, **kwargs):
-        pass
+def _get_frame_regex():
+    global _frame_regex
+    if _frame_regex is None:
+        stepSep = 'x'
+        _frame_regex = re.compile('(-?\d+)(?:-(\d+)(?:%s(\d+))?)?' % stepSep)
+    return _frame_regex
+
+
+def parse_frames(frames):
+    sequence = []
+    for start, stop, step in _get_frame_regex().findall(frames):
+        start = int(start)
+        if not stop:
+            sequence.append(start)
+        else:
+            stop = int(stop)
+            if stop == start:
+                sequence.append(start)
+                continue
+
+            if not step:
+                step = 1
+            else:
+                step = int(step)
+
+            # Head off attempts to create ridiculously large frame lists
+            if (stop - start) / step > 1000000:
+                raise SequenceParseOverflow(
+                    'Attempted to parse range of '
+                    '%d frames from range string %r'
+                    % ((stop - start) / step, frames))
+            sequence.extend(xrange(start, stop + 1, step))
+    return sequence
 
 
 def submit_job(pulse_url, job_info, plugin_info, aux_files=None, auth=None):
@@ -76,11 +112,46 @@ def submit_job(pulse_url, job_info, plugin_info, aux_files=None, auth=None):
     resp = requests.post(url, auth=auth, data=json.dumps(data))
 
     if not resp.ok:
-        print ('Request failed with status {0:d}: '
-               '{1} {2}').format(resp.status_code, resp.reason, resp.text)
+        print('Request failed with status {0:d}: '
+              '{1} {2}').format(resp.status_code, resp.reason, resp.text)
         raise PulseRequestError(resp.status_code, resp.text)
 
     return resp.json()['_id']
+
+
+# celery deadline internals --
+
+def _mongo_collection(client):
+    return client['celery_deadline']['job_tasks']
+
+
+class Formatter(object):
+    def __init__(self, headers, job_info):
+        self.values = {
+            'group_id': headers['group'] or '',
+            'root_id': headers['root_id'],
+            'task_id': headers['id'],
+            'task_name': headers['task'],
+            'task_args': headers['argsrepr'],
+            'task_kwargs': headers['kwargsrepr'],
+            'app_name': headers['task'].rsplit('.', 1)[0],
+            'plugin': job_info['Plugin'],
+        }
+
+        # set defaults
+        if self.values['group_id']:
+            job_info.setdefault('BatchName', '{plugin}-{group_id}')
+        job_info.setdefault('Name', '{plugin}-{task_name}-{task_id}')
+
+    def expand_tokens(self, s):
+        return s.format(**self.values)
+
+
+# override the base virtual channel so that it doesn't use the connection
+# object.  we use this for converting to and from Message objects.
+class DummyChannel(base.Channel):
+    def __init__(self, *args, **kwargs):
+        pass
 
 
 class DeadlineProducer(kombu.Producer):
@@ -100,24 +171,26 @@ class DeadlineProducer(kombu.Producer):
                 headers=None, compression=None, exchange=None, retry=False,
                 retry_policy=None, declare=None, expiration=None,
                 **properties):
+        # copied from Producer.publish:
         headers = {} if headers is None else headers
+        compression = self.compression if compression is None else compression
+        if expiration is not None:
+            properties['expiration'] = str(int(expiration * 1000))
 
-        # FIXME:
-        # detect if deadline was requested based on properties.
-        # maybe this doubles as way of passing pulse URL?
+        job_info = properties.get('job_info')
+        plugin_info = properties.get('plugin_info')
+
         is_task = 'task' in headers
         is_builtin = is_task and headers['task'].split('.')[0] == 'celery'
-        deadline_requested = not is_builtin
-        if is_task and deadline_requested and self.deadline_pulse_url and self.deadline_mongo_url:
+        deadline_requested = not is_builtin and \
+                             (job_info is not None or plugin_info is not None)
+        if deadline_requested and not (self.deadline_pulse_url and self.deadline_mongo_url):
+            raise ValueError()
+        if is_task and deadline_requested:
             channel = DummyChannel()
-            compression = self.compression if compression is None else compression
-            job_info = properties.get('job_info', {}).copy()
-            plugin_info = properties.get('plugin_info', {}).copy()
+            job_info = {} if job_info is None else job_info.copy()
+            plugin_info = {} if plugin_info is None else plugin_info.copy()
             group_id = properties.pop('deadline_group_id', None)
-
-            # copied from Producer.publish:
-            if expiration is not None:
-                properties['expiration'] = str(int(expiration * 1000))
 
             # setup job_info:
             if headers['task'] == __name__ + '.plugin_task':
@@ -130,8 +203,7 @@ class DeadlineProducer(kombu.Producer):
                     job_info['Frames'] = frames
                     # store the group_id, which is used to retrieve the
                     # celery tasks for the job.
-                    key = _unused_plugin_key(plugin_info)
-                    job_info[key] = 'celery_id=%s' % group_id
+                    set_extra_info(job_info, 'celery_id', group_id)
                 else:
                     # don't submit to Deadline
                     job_info = None
@@ -148,8 +220,8 @@ class DeadlineProducer(kombu.Producer):
                 body, priority, content_type,
                 content_encoding, headers, properties,
             )
-            print "-" * 30
-            print message
+            print("-" * 30)
+            print(message)
 
             if job_info:
                 # submit to Deadline!
@@ -158,15 +230,15 @@ class DeadlineProducer(kombu.Producer):
                                                    plugin_info)
                 if group_id is None:
                     # when no group_id is provided, the job_id is used as a
-                    # fallback.  group_id is used for plugin_tasks because of
-                    # the fact that only the first plugin_task in a job
-                    # triggers a Deadline submission, and therefore only the
-                    # first task has easy access to the job_id. providing an
-                    # explicit group_id to all plugin_task's avoids the need
-                    # to devise a system to share the job_id with subsequent
-                    # tasks.
+                    # fallback.  group_id is explicitly provided for plugin_
+                    # tasks because of the fact that only the first plugin_task
+                    # in a job triggers a Deadline submission, and therefore
+                    # only the first task has easy access to the job_id.
+                    # providing an explicit group_id to all plugin_task's
+                    # avoids the need to devise a system to share the job_id
+                    # with subsequent tasks.
                     group_id = job_id
-                print "JOBID %s" % job_id
+                print("JOBID %s" % job_id)
             print("Inserting data into mongo using %s" % group_id)
             tasks_col = _mongo_collection(self.mongo_client)
 
@@ -180,28 +252,12 @@ class DeadlineProducer(kombu.Producer):
                 exchange, retry, retry_policy, declare, **properties)
 
     def _submit_deadline_job(self, headers, job_info, plugin_info):
-
-        values = {
-            'group_id': headers['group'] or '',
-            'root_id': headers['root_id'],
-            'task_id': headers['id'],
-            'task_name': headers['task'],
-            'task_args': headers['argsrepr'],
-            'task_kwargs': headers['kwargsrepr'],
-            'app_name': headers['task'].rsplit('.', 1)[0],
-            'plugin': job_info['Plugin'],
-        }
-
-        # set defaults
-        if values['group_id']:
-            job_info.setdefault('BatchName', '{plugin}-{group_id}')
-        job_info.setdefault('Name', '{plugin}-{task_name}-{task_id}')
-
         # expand values:
-        job_info['Name'] = job_info['Name'].format(**values)
+        formatter = Formatter(headers, job_info)
+        job_info['Name'] = formatter.expand_tokens(job_info['Name'])
         batch_name = job_info.get('BatchName')
         if batch_name:
-            job_info['BatchName'] = batch_name.format(**values)
+            job_info['BatchName'] = formatter.expand_tokens(batch_name)
         return submit_job(self.deadline_pulse_url, job_info, plugin_info)
 
 
@@ -220,12 +276,13 @@ class DeadlineConsumer(kombu.Consumer):
         # scheme. otherwise, the behavior is dependent on the channel type
         self.channel = DummyChannel()
         for raw_message in self.raw_messages:
-            print "raw_message"
-            print raw_message
+            print("raw_message")
+            print(raw_message)
+            # mark as received
             raw_message['properties']['delivery_tag'] = kombu.utils.uuid()
-            print "running"
+            print("running")
             self._receive_callback(raw_message)
-            print "done receive"
+            print("done receive")
         # shut down the worker
         sys.exit(0)
 
@@ -274,7 +331,7 @@ class DeadlineAMQP(AMQP):
         mongo_url = conf.get('deadline_mongo_url')
         if mongo_url:
             return mongo_url
-        if conf.result_backend and conf.result_backend.startswith('mongodb://'):
+        if conf.result_backend and conf.result_backend.startswith('mongodb:'):
             return conf.result_backend
         return
 
@@ -289,7 +346,7 @@ class DeadlineAMQP(AMQP):
 
     def Producer(self, *args, **kwargs):
         kwargs['deadline_pulse_url'] = self.app.conf.get('deadline_pulse_url')
-        print "deadline_pulse_url", kwargs['deadline_pulse_url']
+        print("deadline_pulse_url %s" % kwargs['deadline_pulse_url'])
         kwargs['deadline_mongo_url'] = self.mongo_url
         return DeadlineProducer(*args, **kwargs)
 
@@ -304,43 +361,23 @@ class DeadlineAMQP(AMQP):
         return self._producer_pool
 
 
-# ---
-
-def _get_deadline_task_id(parent_task_id, frame):
-    # FIXME: which approach?
-    # frame_id = uuid()
-    frame_id = '%s-%06d' % (parent_task_id, frame)
-    # frame_id = uuid5(parent_task_id, '%06' % frame)
-    return frame_id
-
-
-# class DeadlinePluginTask(Task):
-#     def apply_async(self, args=None, kwargs=None, task_id=None, producer=None,
-#                     link=None, link_error=None, shadow=None, **options):
-#         job_info = options.get('job_info', {})
-#         plugin_info = options['plugin_info']
-#         pulse_url = self.app['deadline_pulse_url']
-#         frames = job_info.get('Frames', '1')
-#         results = []
-#         task_id = task_id or uuid()
-#         for frame in parse_frames(frames):
-#             frame_id =_get_deadline_task_id(task_id, frame)
-#             results.append(self.AsyncResult(frame_id))
-#         # TODO: insert the task_id as job metadata
-#         job_id = submit_job(pulse_url, job_info, plugin_info)
-#         return ResultSet(results, app=self.app)
-
+# tasks ---
 
 # FIXME: look into global tasks, which get added to all apps automatically
-import re
 from celery import Celery, group
 app = Celery('celery_deadline')
 app.amqp_cls = 'celery_deadline:DeadlineAMQP'
 app.config_from_object('celery_deadline_config')
 
 
-class JobDeletedError(Exception):
-    pass
+# TODO: create a plugin_task that returns registered OutputFilenames as results.
+# Examples:
+# OutputDirectory0=\\fileserver\Project\Renders\OutputFolder\
+# OutputFilename0=o_HDP_010_BG_v01.####.exr
+# OutputDirectory1=\\fileserver\Project\Renders\OutputFolder\
+# OutputFilename1=o_HDP_010_SPEC_v01####.dpx
+# OutputDirectory2=\\fileserver\Project\Renders\OutputFolder\
+# OutputFilename2=o_HDP_010_RAW_v01_####.png
 
 
 @app.task(bind=True)
@@ -364,7 +401,7 @@ def plugin_task(self, plugin, frames, frame, index):
     return frame
 
 
-@app.task
+@app.task(throws=(JobDeletedError,))
 def _on_job_deleted():
     """
     task which is patched in on Deadline to fail incomplete
@@ -373,14 +410,14 @@ def _on_job_deleted():
     raise JobDeletedError()
 
 
-def job(plugin, frames, **plugin_info):
+def job(plugin_name, frames, job_info=None, plugin_info=None):
     """
     Create a group of tasks for executing each of the frame packets for
     the given Deadline plugin.
 
     Parameters
     ----------
-    plugin : str
+    plugin_name : str
     frames : str
 
     Returns
@@ -389,10 +426,21 @@ def job(plugin, frames, **plugin_info):
     """
     deadline_group_id = ObjectId()
     return group(
-        [plugin_task.signature((plugin, frames, frame, i),
+        [plugin_task.signature((plugin_name, frames, frame, i),
                                plugin_info=plugin_info,
+                               job_info=job_info,
                                deadline_group_id=deadline_group_id)
          for i, frame in enumerate(parse_frames(frames))])
+
+# --
+
+# FIXME: unused:
+def _get_deadline_task_id(parent_task_id, frame):
+    # FIXME: which approach?
+    # frame_id = uuid()
+    frame_id = '%s-%06d' % (parent_task_id, frame)
+    # frame_id = uuid5(parent_task_id, '%06' % frame)
+    return frame_id
 
 
 def process_task_messages(messages, values):
@@ -409,68 +457,3 @@ def process_task_messages(messages, values):
     # get celery task_id for current frame
     # frame_id = _get_deadline_task_id(task_id, frame)
 
-
-# TODO: create a plugin that returns registered OutputFilenames as results. Example:
-# OutputDirectory0=\\fileserver\Project\Renders\OutputFolder\
-# OutputFilename0=o_HDP_010_BG_v01.####.exr
-# OutputDirectory1=\\fileserver\Project\Renders\OutputFolder\
-# OutputFilename1=o_HDP_010_SPEC_v01####.dpx
-# OutputDirectory2=\\fileserver\Project\Renders\OutputFolder\
-# OutputFilename2=o_HDP_010_RAW_v01_####.png
-
-
-_frame_regex = None
-
-def _get_frame_regex():
-    global _frame_regex
-    if _frame_regex is None:
-        stepSep = 'x'
-        _frame_regex = re.compile('(-?\d+)(?:-(\d+)(?:%s(\d+))?)?' % stepSep)
-    return _frame_regex
-
-    # regexNamedGrp = '(?P<frames>%s)'
-    # groupSep = ','
-    # frameRegexStr = '%s(?:%s(%s))*' % (partRegexStr, groupSep,
-    #                                          partRegexStr)
-    # regexStr = regexNamedGrp % frameRegexStr
-    #
-    # # group the whole thing (for re.split)
-    # regexStr = '(' + regexStr + ')'
-    # regex = re.compile(regexStr + '$')
-
-
-def parse_frames(frames):
-    # match = self.getValidator().match(sequenceStr)
-    # if not match:
-    #     raise InvalidSequenceError("Invalidly formatted sequence "
-    #                                "string: %r" % sequenceStr)
-    # # sequenceStr = sequenceStr.rstrip(self.paddingFormat)
-    # # remove the padding
-    # frames = match.group('frames')
-    # if not frames:
-    #     raise NonExplicitFramesError(sequenceStr)
-
-    sequence = []
-    for start, stop, step in _get_frame_regex().findall(frames):
-        start = int(start)
-        if not stop:
-            sequence.append(start)
-        else:
-            stop = int(stop)
-            if stop == start:
-                sequence.append(start)
-                continue
-
-            if not step:
-                step = 1
-            else:
-                step = int(step)
-
-            # Head off attempts to create ridiculously large frame lists
-            if (stop - start) / step > 1000000:
-                raise SequenceParseOverflow('Attempted to parse range of '
-                    '%d frames from range string %r'
-                    % ((stop - start) / step, frames))
-            sequence.extend(xrange(start, stop + 1, step))
-    print sequence
-    return sequence

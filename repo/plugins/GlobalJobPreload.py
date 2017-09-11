@@ -113,7 +113,7 @@ def __main__(deadlinePlugin):
     job = deadlinePlugin.GetJob()
 
     celery_id = job.GetJobExtraInfoKeyValue('celery_id')
-    deadlinePlugin.LogInfo("CELERY: group_id %s" % celery_id)
+    deadlinePlugin.LogInfo("CELERY: group_id: %s" % celery_id)
     deadlinePlugin.LogInfo("CELERY: JobName: %s" % job.JobName)
     deadlinePlugin.LogInfo("CELERY: JobId: %s" % job.JobId)
 

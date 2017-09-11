@@ -1,7 +1,19 @@
 
 # Celery Deadline
 
-Use Deadline as a celery worker, and combine Deadline and celery tasks.
+Use Deadline as a celery worker, and intermix Deadline and celery tasks.
+
+Celery is insanely popular in the python programming world, with over 7,500 stars on github and 2,500 it’s one of the more popular projects on all of github.  Celery’s strengths compared to Deadline lie in the incredibly low startup overhead per task and the ability to pass results between tasks.  It is nowhere near as feature-rich as Deadline or suitable for long-running tasks common in VFX and animation, but harnessing the two together for different types of tasks, and allowing results to pass through networks of tasks (including Deadline tasks) can be incredibly powerful.
+
+Feature | Deadline | Celery
+--- | --- | ---
+**Terminology** | slave, job, task | worker, group, task
+**Worker environment** | dynamic per job/task | immutable per worker 
+**Task startup time** | non-trivial | instant
+**Monitoring** | sophisticated native app | basic web app
+**Scheduling** | groups, priorities, criteria, limits | fixed queues
+**Task dependencies** | yes | yes
+**Tasks can return results** | no | yes
 
 ## Why this a good thing
 
@@ -20,8 +32,8 @@ Unlike Deadline's dependency system, passing results through a network of celery
 ## How to use it
 
 There are two use cases:  
-- submitting celery tasks to Deadline
-- wrapping Deadline tasks in celery tasks
+- submit celery tasks to Deadline
+- wrap Deadline tasks in celery tasks
   
 ### Execute celery tasks using Deadline
 
@@ -73,9 +85,9 @@ are supported, so you can group and chain tasks together, mixing celery tasks ex
 
 ## Setup
 
-- Copy or link the "repo" directory of this project to the "custom" sub-directory of the Deadline repository directory. 
+- Copy the contents of the "repo" directory of this project into the "custom" sub-directory of the Deadline repository directory. 
 - Start the DeadlineWebService
-- Start one or more slaves, and make sure that they have the ability to import the `celery_deadline` module
+- Start one or more slaves, and make sure their environment is setup to be able to import the `celery_deadline` module
 - Start the Monitor
   - Goto `Tools -> Super User Mode`
   - Goto `Tools -> Configure Repository Options...`

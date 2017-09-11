@@ -45,7 +45,8 @@ def test():
 def test_fail():
     from celery import group
     job = group([add.s(2, 2), fail.s(), add.s(4, 4)])
-    result = job.apply_async()
+    # job_info or plugin_info must be passed to trigger submission to deadline
+    result = job.apply_async(job_info={})
     print("waiting for results:")
     # failure aborts iteration when propagate=True
     for x in result.iterate():
@@ -55,8 +56,9 @@ def test_fail():
 def test_plugin():
     from celery_deadline import job
     result = job('Python', '1-5,40',
-                 ScriptFile='/Users/chad/python/untitled.py',
-                 Version='2.7').apply_async()
+                 plugin_info=dict(
+                     ScriptFile='/Users/chad/python/untitled.py',
+                     Version='2.7')).apply_async()
 
     print("waiting for results:")
     for x in result.iterate(propagate=False):
@@ -67,12 +69,13 @@ def test_mixed():
     from celery import chain
     from celery_deadline import job
 
-    # FIXME: devise way to put `sum` on a normal celery worker
     task = chain(
         job('Python', '1-2',
-            ScriptFile='/Users/chad/python/untitled.py',
-            Version='2.7'),
-        sum.s())
+            plugin_info=dict(
+                ScriptFile='/Users/chad/python/untitled.py',
+                Version='2.7')),
+        sum.s()  # <-- will go to a celery worker
+    )
     result = task.apply_async()
     print("waiting for results:")
     print(result.get())
